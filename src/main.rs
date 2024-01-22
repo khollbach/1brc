@@ -80,6 +80,11 @@ fn print_stats(stats: &HashMap<String, Stats>) {
 
 impl fmt::Display for Stats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Note: this rounds to nearest.
+        //
+        // The challenge rules say to round away from zero (the opposite of
+        // truncate), but their example code doesn't do what they say -- it
+        // rounds to nearest.
         write!(f, "{:.1}/{:.1}/{:.1}", self.min, self.avg(), self.max)
     }
 }
