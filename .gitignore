@@ -1,5 +1,8 @@
 /target
 
-/input.txt
-/output.txt
-/expected-output.txt
+/perf.data
+/perf.data.old
+/flamegraph.svg
+
+/inputs
+/outputs

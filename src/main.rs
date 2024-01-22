@@ -16,9 +16,16 @@ fn main() -> Result<()> {
     for l in BufReader::new(file).lines() {
         let l = l?;
         let (name, value) = l.split_once(';').context("expected semicolon")?;
-        let name = name.to_owned();
         let value = value.parse()?;
-        stats.entry(name).or_default().update(value);
+
+        match stats.get_mut(name) {
+            None => {
+                let mut st = Stats::default();
+                st.update(value);
+                stats.insert(name.to_owned(), st);
+            }
+            Some(st) => st.update(value),
+        }
     }
     print_stats(&stats);
 
