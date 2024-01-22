@@ -1,7 +1,7 @@
+use ahash::{HashMap, HashMapExt};
 use anyhow::{ensure, Context, Result};
 use itertools::Itertools;
 use std::{
-    collections::HashMap,
     env, fmt,
     fs::File,
     io::{BufRead, BufReader},
