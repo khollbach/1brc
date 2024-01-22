@@ -1,9 +1,11 @@
 use anyhow::{ensure, Context, Result};
+use itertools::Itertools;
 use std::{
     collections::HashMap,
     env, fmt,
     fs::File,
     io::{BufRead, BufReader},
+    str,
 };
 
 fn main() -> Result<()> {
@@ -12,21 +14,21 @@ fn main() -> Result<()> {
     let filename = &args[0];
     let file = File::open(filename).with_context(|| format!("couldn't open file {filename:?}"))?;
 
-    let mut stats = HashMap::<String, Stats>::with_capacity(10_000);
+    let mut stats = HashMap::<Vec<u8>, Stats>::with_capacity(10_000);
 
     let mut file = BufReader::new(file);
-    let mut line = String::with_capacity(128);
+    let mut line = Vec::<u8>::with_capacity(128);
     loop {
         line.clear();
-        if file.read_line(&mut line)? == 0 {
+        if file.read_until(b'\n', &mut line)? == 0 {
             break;
         }
-        if line.ends_with('\n') {
+        if line.ends_with(b"\n") {
             line.pop();
         }
 
-        let (name, value) = line.split_once(';').context("expected semicolon")?;
-        let value = value.parse()?;
+        let (name, value) = split_once(&line, b';').context("expected semicolon")?;
+        let value = str::from_utf8(value)?.parse()?;
 
         match stats.get_mut(name) {
             None => {
@@ -38,9 +40,14 @@ fn main() -> Result<()> {
         }
     }
 
-    print_stats(&stats);
+    print_stats(&stats)?;
 
     Ok(())
+}
+
+fn split_once(s: &[u8], delim: u8) -> Option<(&[u8], &[u8])> {
+    let i = s.iter().position(|&b| b == delim)?;
+    Some((&s[..i], &s[i + 1..]))
 }
 
 /// Aggregated statistics for a single weather station.
@@ -75,12 +82,14 @@ impl Stats {
     }
 }
 
-fn print_stats(stats: &HashMap<String, Stats>) {
-    print!("{{");
-
-    let mut pairs: Vec<_> = stats.iter().collect();
+fn print_stats(stats: &HashMap<Vec<u8>, Stats>) -> Result<()> {
+    let mut pairs: Vec<_> = stats
+        .iter()
+        .map(|(name, value)| anyhow::Ok((str::from_utf8(name)?, value)))
+        .try_collect()?;
     pairs.sort_unstable_by_key(|&(name, _)| name);
 
+    print!("{{");
     let mut first = true;
     for (name, stat) in pairs {
         if first {
@@ -88,12 +97,12 @@ fn print_stats(stats: &HashMap<String, Stats>) {
         } else {
             print!(", ");
         }
-
         print!("{name}={stat}");
     }
-
     print!("}}");
     println!();
+
+    Ok(())
 }
 
 impl fmt::Display for Stats {
