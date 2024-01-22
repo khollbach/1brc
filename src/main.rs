@@ -12,10 +12,20 @@ fn main() -> Result<()> {
     let filename = &args[0];
     let file = File::open(filename).with_context(|| format!("couldn't open file {filename:?}"))?;
 
-    let mut stats = HashMap::<String, Stats>::new();
-    for l in BufReader::new(file).lines() {
-        let l = l?;
-        let (name, value) = l.split_once(';').context("expected semicolon")?;
+    let mut stats = HashMap::<String, Stats>::with_capacity(10_000);
+
+    let mut file = BufReader::new(file);
+    let mut line = String::with_capacity(128);
+    loop {
+        line.clear();
+        if file.read_line(&mut line)? == 0 {
+            break;
+        }
+        if line.ends_with('\n') {
+            line.pop();
+        }
+
+        let (name, value) = line.split_once(';').context("expected semicolon")?;
         let value = value.parse()?;
 
         match stats.get_mut(name) {
@@ -27,6 +37,7 @@ fn main() -> Result<()> {
             Some(st) => st.update(value),
         }
     }
+
     print_stats(&stats);
 
     Ok(())
