@@ -28,7 +28,7 @@ fn main() -> Result<()> {
         }
 
         let (name, value) = split_once(&line, b';').context("expected semicolon")?;
-        let value = str::from_utf8(value)?.parse()?;
+        let value = parse_f32(value).context("failed to parse special-case f32")?;
 
         match stats.get_mut(name) {
             None => {
@@ -48,6 +48,43 @@ fn main() -> Result<()> {
 fn split_once(s: &[u8], delim: u8) -> Option<(&[u8], &[u8])> {
     let i = s.iter().position(|&b| b == delim)?;
     Some((&s[..i], &s[i + 1..]))
+}
+
+fn parse_f32(mut s: &[u8]) -> Option<f32> {
+    let minus = if s[0] == b'-' {
+        s = &s[1..];
+        -1.
+    } else {
+        1.
+    };
+
+    let magnitude = match s.len() {
+        3 => {
+            if s[1] != b'.' {
+                return None;
+            }
+            let x = to_digit(s[0])? * 1.;
+            let y = to_digit(s[2])? * 0.1;
+            x + y
+        }
+        4 => {
+            if s[2] != b'.' {
+                return None;
+            }
+            let a = to_digit(s[0])? * 10.;
+            let b = to_digit(s[1])? * 1.;
+            let c = to_digit(s[3])? * 0.1;
+            a + b + c
+        }
+        _ => return None,
+    };
+
+    Some(minus * magnitude)
+}
+
+fn to_digit(c: u8) -> Option<f32> {
+    let d = (c as char).to_digit(10)?;
+    Some(d as f32)
 }
 
 /// Aggregated statistics for a single weather station.
