@@ -4,25 +4,88 @@ use itertools::Itertools;
 use std::{
     env, fmt,
     fs::File,
-    io::{BufRead, BufReader},
-    str,
+    io::{prelude::*, BufReader, SeekFrom},
+    str, thread,
 };
+
+/// Max number of unique names in the input.
+const NUM_KEYS: usize = 10_000;
+
+/// Max length of input lines.
+const LINE_LEN: usize = 128;
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     ensure!(args.len() == 1, "expected filename");
+
     let filename = &args[0];
     let file = File::open(filename).with_context(|| format!("couldn't open file {filename:?}"))?;
+    let num_threads = thread::available_parallelism()?.into();
+    let chunks = chunks(file, num_threads)?;
 
-    let mut stats = HashMap::<Vec<u8>, Stats>::with_capacity(10_000);
+    let mut threads = Vec::with_capacity(chunks.len());
+    for ch in chunks {
+        let file = File::open(filename)?;
+        let t = thread::spawn(move || chunk_stats(file, ch));
+        threads.push(t);
+    }
+
+    let mut stats = HashMap::<Vec<u8>, Stats>::with_capacity(NUM_KEYS);
+    for t in threads {
+        let chunk_stats = t.join().expect("thread panic")?;
+        for (k, st) in chunk_stats {
+            stats.entry(k).or_default().merge(st);
+        }
+    }
+    print_stats(&stats)?;
+
+    Ok(())
+}
+
+/// Partition a file into exactly n chunks, each represented as `start..end`.
+///
+/// Chunk boundaries are always after a newline (except the first, and possibly
+/// the last).
+///
+/// Chunks may be empty (unlikely for large files).
+fn chunks(file: File, n: usize) -> Result<Vec<(u64, u64)>> {
+    assert_ne!(n, 0);
+    let len = file.metadata()?.len();
+    let mut file = BufReader::new(file);
+
+    let mut boundaries = Vec::with_capacity(n);
+    boundaries.push(0);
+
+    let mut buf = Vec::with_capacity(LINE_LEN);
+    let n = n as u64;
+    for i in 1..=n - 1 {
+        let offset = len * i / n;
+        file.seek(SeekFrom::Start(offset))?;
+        buf.clear();
+        file.read_until(b'\n', &mut buf)?;
+        boundaries.push(offset + buf.len() as u64);
+    }
+
+    boundaries.push(len);
+
+    Ok(boundaries.into_iter().tuple_windows().collect())
+}
+
+fn chunk_stats(file: File, (start, end): (u64, u64)) -> Result<HashMap<Vec<u8>, Stats>> {
+    let mut stats = HashMap::with_capacity(NUM_KEYS);
 
     let mut file = BufReader::new(file);
-    let mut line = Vec::<u8>::with_capacity(128);
-    loop {
+    file.seek(SeekFrom::Start(start))?;
+
+    let mut curr_offset = start;
+    let mut line = Vec::<u8>::with_capacity(LINE_LEN);
+    while curr_offset < end {
         line.clear();
-        if file.read_until(b'\n', &mut line)? == 0 {
+        let n = file.read_until(b'\n', &mut line)? as u64;
+        if n == 0 {
             break;
         }
+        curr_offset += n;
         if line.ends_with(b"\n") {
             line.pop();
         }
@@ -32,17 +95,13 @@ fn main() -> Result<()> {
 
         match stats.get_mut(name) {
             None => {
-                let mut st = Stats::default();
-                st.update(value);
-                stats.insert(name.to_owned(), st);
+                stats.insert(name.to_owned(), Stats::singleton(value));
             }
             Some(st) => st.update(value),
         }
     }
 
-    print_stats(&stats)?;
-
-    Ok(())
+    Ok(stats)
 }
 
 fn split_once(s: &[u8], delim: u8) -> Option<(&[u8], &[u8])> {
@@ -107,11 +166,24 @@ impl Default for Stats {
 }
 
 impl Stats {
+    fn singleton(value: f32) -> Self {
+        Self {
+            min: value,
+            max: value,
+            sum: value,
+            count: 1,
+        }
+    }
+
     fn update(&mut self, value: f32) {
-        self.min = f32::min(self.min, value);
-        self.max = f32::max(self.max, value);
-        self.sum += value;
-        self.count += 1;
+        self.merge(Self::singleton(value))
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.min = f32::min(self.min, other.min);
+        self.max = f32::max(self.max, other.max);
+        self.sum += other.sum;
+        self.count += other.count;
     }
 
     fn avg(&self) -> f32 {
