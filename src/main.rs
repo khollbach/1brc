@@ -1,18 +1,11 @@
 use ahash::{HashMap, HashMapExt};
 use anyhow::{ensure, Context, Result};
 use itertools::Itertools;
-use std::{
-    env, fmt,
-    fs::File,
-    io::{prelude::*, BufReader, SeekFrom},
-    str, thread,
-};
+use memmap2::Mmap;
+use std::{env, fmt, fs::File, str, sync::Arc, thread};
 
 /// Max number of unique names in the input.
 const NUM_KEYS: usize = 10_000;
-
-/// Max length of input lines.
-const LINE_LEN: usize = 128;
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -20,13 +13,15 @@ fn main() -> Result<()> {
 
     let filename = &args[0];
     let file = File::open(filename).with_context(|| format!("couldn't open file {filename:?}"))?;
+    let bytes = Arc::new(unsafe { Mmap::map(&file)? });
+
     let num_threads = thread::available_parallelism()?.into();
-    let chunks = chunks(file, num_threads)?;
+    let chunks = chunks(&bytes, num_threads)?;
 
     let mut threads = Vec::with_capacity(chunks.len());
-    for ch in chunks {
-        let file = File::open(filename)?;
-        let t = thread::spawn(move || chunk_stats(file, ch));
+    for (start, end) in chunks {
+        let bytes = Arc::clone(&bytes);
+        let t = thread::spawn(move || chunk_stats(&bytes[start..end]));
         threads.push(t);
     }
 
@@ -42,56 +37,51 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Partition a file into exactly n chunks, each represented as `start..end`.
+/// Partition `bytes` into exactly n chunks, each represented as `start..end`.
 ///
 /// Chunk boundaries are always after a newline (except the first, and possibly
 /// the last).
 ///
-/// Chunks may be empty (unlikely for large files).
-fn chunks(file: File, n: usize) -> Result<Vec<(u64, u64)>> {
+/// Chunks may be empty (unlikely if `bytes` is large and has many newlines).
+fn chunks(bytes: &[u8], n: usize) -> Result<Vec<(usize, usize)>> {
     assert_ne!(n, 0);
-    let len = file.metadata()?.len();
-    let mut file = BufReader::new(file);
 
     let mut boundaries = Vec::with_capacity(n);
     boundaries.push(0);
 
-    let mut buf = Vec::with_capacity(LINE_LEN);
-    let n = n as u64;
     for i in 1..=n - 1 {
-        let offset = len * i / n;
-        file.seek(SeekFrom::Start(offset))?;
-        buf.clear();
-        file.read_until(b'\n', &mut buf)?;
-        boundaries.push(offset + buf.len() as u64);
+        let offset = bytes.len() * i / n;
+        let newline = offset
+            + bytes[offset..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .unwrap_or(bytes.len());
+        boundaries.push(newline + 1);
     }
 
-    boundaries.push(len);
+    boundaries.push(bytes.len());
 
     Ok(boundaries.into_iter().tuple_windows().collect())
 }
 
-fn chunk_stats(file: File, (start, end): (u64, u64)) -> Result<HashMap<Vec<u8>, Stats>> {
+fn chunk_stats(bytes: &[u8]) -> Result<HashMap<Vec<u8>, Stats>> {
     let mut stats = HashMap::with_capacity(NUM_KEYS);
 
-    let mut file = BufReader::new(file);
-    file.seek(SeekFrom::Start(start))?;
+    let mut i = 0;
+    while i < bytes.len() {
+        let semi = i + bytes[i..]
+            .iter()
+            .position(|&b| b == b';')
+            .context("expected semicolon")?;
+        let newline = bytes[semi + 1..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|offset| semi + 1 + offset)
+            .unwrap_or(bytes.len());
 
-    let mut curr_offset = start;
-    let mut line = Vec::<u8>::with_capacity(LINE_LEN);
-    while curr_offset < end {
-        line.clear();
-        let n = file.read_until(b'\n', &mut line)? as u64;
-        if n == 0 {
-            break;
-        }
-        curr_offset += n;
-        if line.ends_with(b"\n") {
-            line.pop();
-        }
-
-        let (name, value) = split_once(&line, b';').context("expected semicolon")?;
-        let value = parse_f32(value).context("failed to parse special-case f32")?;
+        let name = &bytes[i..semi];
+        let value =
+            parse_f32(&bytes[semi + 1..newline]).context("failed to parse special-case f32")?;
 
         match stats.get_mut(name) {
             None => {
@@ -99,14 +89,11 @@ fn chunk_stats(file: File, (start, end): (u64, u64)) -> Result<HashMap<Vec<u8>, 
             }
             Some(st) => st.update(value),
         }
+
+        i = newline + 1;
     }
 
     Ok(stats)
-}
-
-fn split_once(s: &[u8], delim: u8) -> Option<(&[u8], &[u8])> {
-    let i = s.iter().position(|&b| b == delim)?;
-    Some((&s[..i], &s[i + 1..]))
 }
 
 fn parse_f32(mut s: &[u8]) -> Option<f32> {
